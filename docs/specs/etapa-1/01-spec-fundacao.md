@@ -100,7 +100,7 @@ Implementado como um `prometheus.Collector` que lê `pool.Stat()` no momento do 
 
 ### Módulo Go
 
-`github.com/samuka7abr/auction-system`, em minúsculas, ainda que o repositório seja `Auction-System`. O projeto é um binário, nunca uma dependência importada, e um path com maiúsculas produz escapes `!a!uction` no proxy de módulos e imports feios em todo arquivo.
+`github.com/samuka7abr/bid-storm`, em minúsculas, igual ao repositório. O projeto é um binário, nunca uma dependência importada, e um path com maiúsculas produziria escapes como `!b!id` no proxy de módulos e imports feios em todo arquivo.
 
 ## Requisitos Funcionais
 
@@ -172,7 +172,7 @@ Até 20 arquivos e aproximadamente 600 linhas de código próprio, sem contar `g
 Prompt:
 
 ```text
-Implemente docs/specs/etapa-1/01-spec-fundacao.md no repositorio Auction-System.
+Implemente docs/specs/etapa-1/01-spec-fundacao.md no repositorio bid-storm.
 
 Leia antes de comecar:
   docs/specs/etapa-1/01-spec-fundacao.md   (a spec — a autoridade)
@@ -183,7 +183,7 @@ Escopo: apenas RF01..RF07. NAO implemente BidEngine, engine otimista,
 POST /auctions, GET /auctions/:id nem POST /auctions/:id/bids — sao da spec 02.
 
 Regras:
-- Modulo: github.com/samuka7abr/auction-system
+- Modulo: github.com/samuka7abr/bid-storm
 - O schema em docs/projeto/schema.md e literal: nao "melhore" colunas,
   restricoes ou nomes. Se algo parecer errado, pare e pergunte.
 - Rode os checkpoints C1..C5 e cole a saida real de cada um. Nao declare
@@ -250,9 +250,9 @@ cp .env.example .env
 make up
 sleep 15
 docker compose ps
-docker inspect auction-system-postgres-1 \
+docker inspect bid-storm-postgres-1 \
   --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}'
-docker inspect auction-system-auctiond-1 \
+docker inspect bid-storm-auctiond-1 \
   --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}'
 ```
 

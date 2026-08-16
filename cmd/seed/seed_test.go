@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/samuka7abr/auction-system/internal/testsupport"
+	"github.com/samuka7abr/bid-storm/internal/testsupport"
 )
 
 func TestSeedWritesEveryAuctionAndAMatchingManifest(t *testing.T) {

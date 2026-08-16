@@ -23,7 +23,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/samuka7abr/auction-system/internal/db"
+	"github.com/samuka7abr/bid-storm/internal/db"
 )
 
 const (

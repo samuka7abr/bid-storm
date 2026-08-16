@@ -1,4 +1,4 @@
-name: auction-system
+name: bid-storm
 
 services:
   postgres:

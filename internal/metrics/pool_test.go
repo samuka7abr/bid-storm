@@ -6,8 +6,8 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/samuka7abr/auction-system/internal/metrics"
-	"github.com/samuka7abr/auction-system/internal/testsupport"
+	"github.com/samuka7abr/bid-storm/internal/metrics"
+	"github.com/samuka7abr/bid-storm/internal/testsupport"
 )
 
 // Without these five series the cost of the pessimistic engine is

@@ -17,8 +17,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/samuka7abr/auction-system/internal/config"
-	"github.com/samuka7abr/auction-system/internal/db"
+	"github.com/samuka7abr/bid-storm/internal/config"
+	"github.com/samuka7abr/bid-storm/internal/db"
 )
 
 type options struct {

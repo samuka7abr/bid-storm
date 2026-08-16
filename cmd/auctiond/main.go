@@ -16,10 +16,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/samuka7abr/auction-system/internal/config"
-	"github.com/samuka7abr/auction-system/internal/db"
-	"github.com/samuka7abr/auction-system/internal/httpapi"
-	"github.com/samuka7abr/auction-system/internal/metrics"
+	"github.com/samuka7abr/bid-storm/internal/config"
+	"github.com/samuka7abr/bid-storm/internal/db"
+	"github.com/samuka7abr/bid-storm/internal/httpapi"
+	"github.com/samuka7abr/bid-storm/internal/metrics"
 )
 
 const shutdownGrace = 10 * time.Second

@@ -1,4 +1,4 @@
-module github.com/samuka7abr/auction-system
+module github.com/samuka7abr/bid-storm
 
 go 1.25.0
 

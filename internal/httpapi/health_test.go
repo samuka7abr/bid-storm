@@ -10,7 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/samuka7abr/auction-system/internal/httpapi"
+	"github.com/samuka7abr/bid-storm/internal/httpapi"
 )
 
 func TestMain(m *testing.M) {
