@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/samuka7abr/auction-system/internal/testsupport"
+	"github.com/samuka7abr/bid-storm/internal/testsupport"
 )
 
 // The migration has to be reversible, and reapplying it has to land on exactly

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/samuka7abr/auction-system/internal/db"
-	"github.com/samuka7abr/auction-system/internal/testsupport"
+	"github.com/samuka7abr/bid-storm/internal/db"
+	"github.com/samuka7abr/bid-storm/internal/testsupport"
 )
 
 // CheckSchema has to tell the three failures apart, because each one calls for
