@@ -93,7 +93,7 @@ Todo run grava o ambiente junto com o resultado:
 ## Estrutura
 
 ```
-auction-system/
+bid-storm/
 ├── cmd/
 │   ├── auctiond/          # API Gin + WebSocket + shards
 │   ├── closerd/           # worker de fechamento
