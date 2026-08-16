@@ -1,276 +1,203 @@
-# Sistema de Leilão Distribuído — Polyglot Microservices
+# Sistema de Leilão sob Alta Contenção
 
-> Go, Python e TypeScript trabalhando juntos em infraestrutura 100% AWS.
-> Kubernetes orquestrando tudo, Grafana K6 validando sob pressão, Prometheus + Grafana monitorando em tempo real.
-
----
-
-## Por que Polyglot?
-
-Em microsserviços, cada serviço é independente. Então por que forçar uma única linguagem pra tudo?
-
-| Serviço | Linguagem | Por quê? |
-|---|---|---|
-| **Bid Service** | Go | Latência mínima, goroutines nativas, controle fino de memória |
-| **API Gateway** | TypeScript (NestJS) | Ecossistema maduro, middleware rico, DX excelente |
-| **Auth Service** | TypeScript (NestJS) | Passport/JWT bem integrado, guards e decorators |
-| **Auction Service** | TypeScript (NestJS) | TypeORM + validação robusta, gerenciamento de estado |
-| **Notification Service** | Python | Async nativo, integrações ricas (e-mail, SMS), porta pra ML |
-| **Closure Worker** | Python | Tasks assíncronas, processamento em background |
-
-A comunicação entre serviços é **agnóstica de linguagem** — tudo passa por SNS/SQS (eventos), ElastiCache Redis (cache) e RDS PostgreSQL (persistência).
+> Três estratégias de concorrência para o mesmo problema, medidas lado a lado.
+> Go, PostgreSQL e Redis. Um binário, um worker, um harness de carga.
 
 ---
 
-## Por que isso NÃO é CRUD?
+## O problema
 
-| CRUD típico | Este projeto |
-|---|---|
-| `POST /bids` e pronto | Controle de concorrência otimista com versioning |
-| Sem preocupação com duplicatas | Idempotência distribuída por chave única |
-| Tudo síncrono | Processamento via filas + workers |
-| Polling para atualizar | Real-time via WebSockets |
-| Deploy manual | Kubernetes com auto-scaling |
-| "Funciona no meu PC" | Load testing com Grafana K6 + observabilidade |
+Leilão tem uma propriedade que quase nenhum sistema CRUD tem: **contenção extrema sobre um único registro**.
 
----
+Mil pessoas dando lance no mesmo item no último segundo é o pior caso possível de concorrência. Todas as escritas disputam a mesma linha, todas precisam ler o estado mais recente antes de decidir, e nenhuma pode ser perdida nem aplicada duas vezes.
 
-## Stack
+A pergunta deste projeto:
 
-| Camada | Tecnologia |
-|---|---|
-| Runtime | Go 1.22+ · Node.js 20+ · Python 3.12+ |
-| Frameworks | Gin/Chi (Go) · NestJS (TS) · FastAPI (Python) |
-| Banco relacional | Amazon RDS (PostgreSQL) |
-| Cache distribuído | Amazon ElastiCache (Redis) |
-| Message Broker | Amazon SNS + SQS |
-| Real-time | Socket.io (WebSockets) |
-| API Gateway | NestJS + http-proxy-middleware |
-| Orquestração | Amazon EKS (Kubernetes) |
-| Container Registry | Amazon ECR |
-| Load Testing | Grafana K6 |
-| Observabilidade | Prometheus + Grafana + CloudWatch |
-| Comunicação interna | REST + gRPC (Bid ↔ Gateway) |
-| IaC | Terraform |
-| CI/CD | GitHub Actions → ECR → EKS |
+> **Qual estratégia de concorrência sustenta throughput e latência quando N clientes disputam o mesmo leilão, e onde exatamente cada uma quebra?**
+
+Não é um projeto sobre leilão. É um projeto sobre contenção, com leilão como carga de trabalho.
 
 ---
 
-## Arquitetura de Microsserviços
+## Hipótese
+
+O controle otimista com versionamento é a resposta que aparece em todo tutorial, e é a **pior** opção sob alta contenção: cada lance perdedor vira um `409`, o cliente retenta, a retentativa colide de novo, e o throughput desaba enquanto o p99 explode.
+
+A hipótese a ser testada:
+
+| Estratégia | Mecanismo | Custo por lance | Hipótese |
+| --- | --- | --- | --- |
+| **Otimista** | `UPDATE ... WHERE version = $n`, 409 + retry no cliente | 1 round-trip, mais N retentativas | Ganha com contenção baixa e muitos leilões paralelos; colapsa com contenção alta |
+| **Pessimista** | `SELECT ... FOR UPDATE` dentro da transação | 1 round-trip, mais espera de lock | Estável, mas segura conexão do pool e limita a concorrência ao tamanho do pool |
+| **Single-writer** | Uma goroutine dona exclusiva de cada leilão, lances entram por canal | 1 envio em canal, mais 1 escrita assíncrona | Ganha com contenção alta: sem conflito, sem retentativa, sem lock |
+
+A terceira é a aposta do projeto. Se cada leilão tem exatamente um escritor, a serialização é estrutural: não existe corrida para resolver, porque não existe corrida. O banco deixa de ser o ponto de sincronização e vira apenas durabilidade.
+
+O entregável não é "implementei um leilão". É **o gráfico do cruzamento das três curvas conforme a contenção sobe**.
+
+---
+
+## Arquitetura
 
 ```mermaid
-flowchart TB
-    Client([🌐 Cliente]) --> ALB[⚖️ AWS ALB\nIngress Controller]
+flowchart LR
+    K6[k6<br/>gerador de carga] --> API
 
-    subgraph EKS["☸️ Amazon EKS Cluster"]
-        ALB --> GW[🚪 API Gateway\nTypeScript · NestJS]
-        GW -->|REST| AUTH[🔐 Auth Service\nTypeScript · NestJS]
-        GW -->|gRPC| BID[💰 Bid Service\nGo · Gin]
-        GW -->|REST| AUCTION[🏛️ Auction Service\nTypeScript · NestJS]
-        NOTIFY[📢 Notification Service\nPython · FastAPI]
-        WORKER[⚙️ Closure Worker\nPython]
+    subgraph APP["auctiond (1 binário Go)"]
+        API[HTTP + WebSocket]
+        IDEM[Middleware<br/>idempotência]
+        STRAT{Estratégia<br/>configurável}
+        SHARDS[Shards single-writer<br/>N goroutines]
+        API --> IDEM --> STRAT
+        STRAT -.->|modo shard| SHARDS
     end
 
-    AUCTION <--> DB_AUCTION[(🐘 RDS PostgreSQL\nAuctions)]
-    BID <--> DB_BID[(🐘 RDS PostgreSQL\nBids)]
-    BID <--> CACHE[(⚡ ElastiCache Redis\nCache + Idempotência)]
+    STRAT --> PG[(PostgreSQL<br/>leilões + lances)]
+    SHARDS --> PG
+    IDEM --> REDIS[(Redis<br/>chaves + Streams)]
+    STRAT -->|evento| REDIS
 
-    BID -->|Publica| SNS_BIDS[📣 SNS Topic\nBidPlaced]
-    AUCTION -->|Publica| SNS_AUCTIONS[📣 SNS Topic\nAuctionClosing]
+    REDIS --> WORKER[closerd<br/>worker de fechamento]
+    WORKER --> PG
+    API -->|WebSocket| BROWSER[Página de demo]
 
-    SNS_BIDS --> SQS_NOTIFY_BIDS[📬 SQS\nbid-notifications]
-    SNS_BIDS --> SQS_AUCTION_UPDATE[📬 SQS\nauction-bid-update]
-    SNS_AUCTIONS --> SQS_CLOSURE[📬 SQS\nauction-closure]
-    SNS_AUCTIONS --> SQS_NOTIFY_CLOSED[📬 SQS\nclosed-notifications]
-
-    SQS_NOTIFY_BIDS --> NOTIFY
-    SQS_AUCTION_UPDATE --> AUCTION
-    SQS_CLOSURE --> WORKER
-    SQS_NOTIFY_CLOSED --> NOTIFY
-    WORKER --> AUCTION
-    NOTIFY -->|Socket.io\nWebSocket| Client
-
-    subgraph Observability["📊 Observabilidade"]
-        PROM[Prometheus]
-        GRAFANA[Grafana]
-        CW[CloudWatch]
-    end
-
-    EKS -.->|métricas| PROM
-    PROM -.-> GRAFANA
-    EKS -.->|logs| CW
-
-    style EKS fill:#232f3e,color:#fff
-    style ALB fill:#8c4fff,color:#fff
-    style GW fill:#3178c6,color:#fff
-    style BID fill:#00add8,color:#fff
-    style NOTIFY fill:#3776ab,color:#fff
-    style WORKER fill:#3776ab,color:#fff
-    style SNS_BIDS fill:#ff9900,color:#fff
-    style SNS_AUCTIONS fill:#ff9900,color:#fff
-    style CACHE fill:#dc382d,color:#fff
-    style PROM fill:#e6522c,color:#fff
-    style GRAFANA fill:#f46800,color:#fff
+    APP -.->|/metrics| PROM[Prometheus] --> GRAF[Grafana]
+    CHECK[Verificador de<br/>invariantes] --> PG
 ```
 
-### SNS + SQS — Fan-out Pattern
+Dois processos, dois bancos, nada mais.
 
-| RabbitMQ | SNS + SQS |
-|---|---|
-| Exchange + routing keys | SNS Topic → SQS subscriptions |
-| NACK + requeue manual | Visibility timeout automático |
-| Precisa provisionar/manter | Serverless, zero ops |
-| DLQ via plugin | DLQ nativa por configuração |
-| Escala manual | Escala infinita automática |
+| Componente | O que é | Por quê |
+| --- | --- | --- |
+| `auctiond` | Binário Go: API HTTP, WebSocket, shards single-writer | Go pela concorrência nativa e pelo custo baixo de goroutine, que é o que viabiliza o modo shard |
+| `closerd` | Worker Go: consome Redis Stream, fecha leilões expirados | Processo separado para poder ser morto durante o teste de caos |
+| PostgreSQL | Leilões, lances, log de eventos | Fonte de verdade e alvo da verificação de invariantes |
+| Redis | Chaves de idempotência e Streams | Streams dão consumer group, pending list, claim por timeout e DLQ, que é o suficiente para exercitar entrega at-least-once sem depender de nuvem |
 
-O padrão **SNS fan-out** replica o comportamento de exchanges: um evento publicado no SNS Topic é entregue automaticamente a **todas as filas SQS** inscritas. Cada consumer tem sua própria fila, garantindo processamento independente.
+**Por que Redis Streams e não SNS/SQS:** as garantias são equivalentes para o que interessa aqui, mas com Streams o mecanismo de retentativa é explícito no código (`XAUTOCLAIM` sobre a pending list) em vez de ser um parâmetro de configuração gerenciado. Além disso roda em `docker compose up` com custo zero.
 
 ---
 
-## 1. Concorrência & Race Conditions 🏁
+## As três estratégias
 
-Num leilão, **milissegundos importam**. O Bid Service (Go) usa controle de concorrência otimista com versionamento no PostgreSQL — se outro lance chegou antes, `0 rows affected` e retorna **409 Conflict**. O cliente re-tenta com o valor atualizado.
+Selecionadas por variável de ambiente (`BID_STRATEGY=optimistic|pessimistic|shard`), com a mesma interface e a mesma suíte de testes rodando contra as três.
 
 ```go
-// internal/bid/service.go
-func (s *Service) PlaceBid(ctx context.Context, auctionID string, amount float64, version int) error {
-    result, err := s.db.ExecContext(ctx,
-        `UPDATE auctions SET highest_bid = $1, version = version + 1, updated_at = NOW()
-         WHERE id = $2 AND version = $3`,
-        amount, auctionID, version,
-    )
-    if err != nil { return err }
-    rows, _ := result.RowsAffected()
-    if rows == 0 { return ErrConflict }
-    return nil
+type BidEngine interface {
+    PlaceBid(ctx context.Context, req BidRequest) (BidResult, error)
 }
 ```
 
----
+### Otimista
 
-## 2. Idempotência 🔄
+```go
+res, err := tx.Exec(ctx, `
+    UPDATE auctions
+       SET highest_bid = $1, highest_bidder = $2, version = version + 1
+     WHERE id = $3 AND version = $4 AND status = 'open' AND highest_bid < $1`,
+    req.Amount, req.UserID, req.AuctionID, req.ExpectedVersion)
 
-Middleware Gin verifica no ElastiCache Redis se a `X-Idempotency-Key` já foi processada. Se sim, retorna resposta cacheada. Se não, processa e armazena com TTL de 24h. Se falhar, remove a key pra permitir retry.
-
----
-
-## 3. Consistência Eventual & Resiliência 📉
-
-Workers Python consomem filas SQS via long polling. O retry é **nativo do SQS** — se o worker não chama `DeleteMessage`, a mensagem reaparece após o `VisibilityTimeout`. Depois de `maxReceiveCount` falhas, vai pra DLQ automaticamente.
-
-```python
-# workers/auction_closing/consumer.py
-async def poll_sqs():
-    async with session.client("sqs", region_name="us-east-1") as sqs:
-        while True:
-            response = await sqs.receive_message(
-                QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=20,
-            )
-            for message in response.get("Messages", []):
-                body = json.loads(message["Body"])
-                payload = json.loads(body["Message"])
-                try:
-                    await handle_auction_closing(payload)
-                    await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
-                except Exception:
-                    pass  # Visibility timeout expira → retry automático
+if res.RowsAffected() == 0 {
+    return BidResult{}, ErrConflict // 409, cliente relê e retenta
+}
 ```
 
----
+Métrica-chave: **taxa de conflito** e **número médio de tentativas por lance aceito**.
 
-## 4. Atualizações em Tempo Real 📡
+### Pessimista
 
-O Notification Service (Python + Socket.io) consome eventos da SQS e empurra via WebSocket. Cada leilão = 1 sala Socket.io. Redis Adapter sincroniza entre múltiplos pods no EKS.
-
----
-
-## 5. Kubernetes (EKS) ☸️
-
-| Sem K8s | Com EKS |
-|---|---|
-| `docker-compose up` e reza | Pods reiniciam sozinhos se crasharem |
-| Escala manual | **HPA** escala pods por CPU/memória/custom metrics |
-| Deploy = downtime | **Rolling updates** com zero downtime |
-| Sem health checks | **Liveness + Readiness probes** |
-
-```yaml
-# k8s/bid-service/deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: bid-service
-  namespace: leilao
-spec:
-  replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-  template:
-    metadata:
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-    spec:
-      containers:
-        - name: bid-service
-          image: 123456789.dkr.ecr.us-east-1.amazonaws.com/bid-service:latest
-          ports:
-            - containerPort: 8080
-            - containerPort: 50051
-            - containerPort: 9090
-          resources:
-            requests: { cpu: "250m", memory: "256Mi" }
-            limits: { cpu: "1000m", memory: "512Mi" }
-          livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
-          readinessProbe:
-            httpGet: { path: /readyz, port: 8080 }
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: bid-service-hpa
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: bid-service
-  minReplicas: 3
-  maxReplicas: 15
-  metrics:
-    - type: Resource
-      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+```go
+row := tx.QueryRow(ctx,
+    `SELECT highest_bid, version FROM auctions WHERE id = $1 FOR UPDATE`,
+    req.AuctionID)
+// valida, escreve, commita
 ```
 
+Métrica-chave: **tempo de espera em lock** e **saturação do pool de conexões**.
+
+### Single-writer
+
+Cada leilão é mapeado deterministicamente para um shard. O shard é dono do estado em memória e é o único que escreve.
+
+```go
+type shard struct {
+    inbox    chan bidCmd
+    auctions map[uuid.UUID]*auctionState // só esta goroutine toca aqui
+}
+
+func (s *shard) run(ctx context.Context) {
+    for cmd := range s.inbox {
+        st := s.auctions[cmd.AuctionID]
+        if cmd.Amount <= st.HighestBid || st.Status != Open {
+            cmd.reply <- BidResult{Accepted: false, Reason: TooLow}
+            continue
+        }
+        st.HighestBid, st.HighestBidder = cmd.Amount, cmd.UserID
+        st.Seq++
+        cmd.reply <- BidResult{Accepted: true, Seq: st.Seq}
+        s.journal <- persistCmd{...} // durabilidade fora do caminho crítico
+    }
+}
+
+func shardFor(auctionID uuid.UUID, n int) int {
+    return int(binary.BigEndian.Uint64(auctionID[:8])) % n
+}
+```
+
+Não há conflito a resolver, porque não há corrida. O custo se desloca para: como garantir durabilidade sem devolver ao cliente um lance que ainda não foi persistido, e o que acontece quando o processo morre com o journal cheio. Essas perguntas são parte do projeto, não um detalhe dele.
+
+Métrica-chave: **latência de confirmação** e **lag do journal**.
+
 ---
 
-## 6. Load Testing & Observabilidade 📊
+## Provas, não features
 
-### Grafana K6 — Teste de Carga
+Três mecanismos transformam o projeto de demonstração em evidência.
 
-**K6** é a ferramenta de load testing da Grafana Labs. Cenários em JavaScript simulam milhares de usuários concorrentes e medem latência, throughput, e error rate.
+### 1. Verificador de invariantes
 
-```javascript
-// tests/load/bid-storm.js
-import http from "k6/http";
-import { check, sleep } from "k6";
-import { randomString } from "https://jslib.k6.io/k6-utils/1.4.0/index.js";
-import { Counter, Trend } from "k6/metrics";
+Roda contra o Postgres depois de cada teste de carga e valida propriedades que precisam valer independentemente da estratégia:
 
-const bidConflicts = new Counter("bid_conflicts");
-const bidLatency = new Trend("bid_latency", true);
+- Os lances aceitos de um leilão formam sequência **estritamente crescente** de valor.
+- Todo lance que recebeu `201` está no banco. Se o k6 recebeu 12.437 confirmações, há exatamente 12.437 linhas.
+- Nenhuma chave de idempotência aparece duas vezes.
+- O vencedor registrado é o maior valor aceito, e o leilão não recebeu lance depois do fechamento.
 
+O checker sai com código diferente de zero se qualquer invariante falhar. É isso que separa "parece funcionar" de "está provado sob 500 clientes simultâneos".
+
+### 2. Duplicatas injetadas
+
+O gerador de carga reenvia **10% das requisições com a mesma `X-Idempotency-Key`**, algumas em paralelo com a original. O relatório mostra zero lances duplos.
+
+A idempotência não é descrita, é demonstrada. O caso interessante é a duplicata que chega **enquanto** a original ainda está em voo: resolvido com `SET key state=in_flight NX PX 30000`, onde o segundo request aguarda ou recebe `409 Idempotency-In-Flight`.
+
+### 3. Caos
+
+`make chaos` derruba componentes durante a carga:
+
+| Alvo | Falha injetada | O que precisa continuar valendo |
+| --- | --- | --- |
+| `closerd` | `docker kill` no meio do processamento | O leilão fecha exatamente uma vez, via `XAUTOCLAIM` sobre a pending list |
+| `auctiond` | Kill de um pod no modo shard | Os leilões daquele shard são reassumidos, sem lance confirmado perdido |
+| Redis | Pausa de 5s | Requisições falham de forma limpa, sem lance aceito fora de ordem |
+| PostgreSQL | Pool saturado artificialmente | Backpressure em vez de timeout em cascata |
+
+Em todos os cenários, o verificador de invariantes precisa continuar verde.
+
+---
+
+## Carga
+
+k6, com contenção como variável independente. O mesmo volume total de requisições distribuído sobre 1, 10 ou 1000 leilões produz curvas completamente diferentes, e é justamente esse eixo que revela o cruzamento entre as estratégias.
+
+```js
 export const options = {
   scenarios: {
-    ramp_up: {
+    ramp: {
       executor: "ramping-vus",
-      startVUs: 0,
       stages: [
-        { duration: "30s", target: 50 },
-        { duration: "1m", target: 200 },
-        { duration: "2m", target: 500 },
+        { duration: "30s", target: 100 },
+        { duration: "1m",  target: 500 },
         { duration: "30s", target: 0 },
       ],
     },
@@ -278,209 +205,222 @@ export const options = {
       executor: "constant-vus",
       vus: 1000,
       duration: "15s",
-      startTime: "3m30s",
+      startTime: "2m",
     },
   },
   thresholds: {
-    http_req_duration: ["p(95)<300", "p(99)<500"],
-    http_req_failed: ["rate<0.05"],
-    bid_latency: ["p(95)<200"],
+    http_req_failed: ["rate<0.01"], // erro real, não 409
+    bid_confirm_latency: ["p(95)<200", "p(99)<500"],
   },
 };
-
-export default function () {
-  const res = http.post(`${__ENV.BASE_URL}/api/bids`,
-    JSON.stringify({ auction_id: __ENV.AUCTION_ID, amount: Math.floor(Math.random() * 10000) + 100, version: 1 }),
-    { headers: { "Content-Type": "application/json", "X-Idempotency-Key": randomString(16), Authorization: `Bearer ${__ENV.TOKEN}` } }
-  );
-  bidLatency.add(res.timings.duration);
-  check(res, { "status is 201 or 409": (r) => r.status === 201 || r.status === 409 });
-  if (res.status === 409) bidConflicts.add(1);
-  sleep(Math.random() * 2);
-}
 ```
+
+Matriz executada por `make bench`: 3 estratégias x 3 níveis de contenção x 2 cenários, com o verificador rodando após cada combinação.
+
+---
+
+## Resultados
+
+> Tabela preenchida com os números reais do `make bench`. Ambiente e commit registrados junto.
+
+| Estratégia | Leilões | VUs no pico | Aceitos/s | p95 confirmação | Taxa de conflito | Tentativas por aceito | Invariantes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Otimista | 1 | 1000 | | | | | |
+| Otimista | 1000 | 1000 | | | | | |
+| Pessimista | 1 | 1000 | | | | | |
+| Pessimista | 1000 | 1000 | | | | | |
+| Single-writer | 1 | 1000 | | | | | |
+| Single-writer | 1000 | 1000 | | | | | |
+
+Gráfico principal: **throughput por nível de contenção**, uma linha por estratégia, com o ponto de cruzamento marcado.
+
+---
+
+## Observabilidade
+
+Cada processo expõe `/metrics`. Métricas próprias além das de runtime:
+
+| Métrica | Tipo | Para quê |
+| --- | --- | --- |
+| `bid_confirm_duration_seconds` | Histogram | Latência fim a fim, com label por estratégia |
+| `bid_conflicts_total` | Counter | Custo real do modo otimista |
+| `bid_attempts_per_accept` | Histogram | Amplificação de retentativa |
+| `shard_inbox_depth` | Gauge | Backpressure no modo single-writer |
+| `journal_lag_seconds` | Gauge | Janela de perda em caso de crash |
+| `stream_pending_entries` | Gauge | Mensagens não confirmadas no fechamento |
+| `idempotency_hits_total` | Counter | Duplicatas efetivamente barradas |
+
+Dashboard único no Grafana, provisionado por arquivo, com painel comparativo lado a lado das três estratégias.
+
+---
+
+## Painel ao vivo
+
+Não é uma interface de leilão. É um **painel de instrumentos**: três colunas lado a lado, uma por estratégia, consumindo os três `auctiond` simultaneamente enquanto o k6 martela os três com carga idêntica.
+
+```
+┌─ OTIMISTA ────────┐ ┌─ PESSIMISTA ──────┐ ┌─ SINGLE-WRITER ───┐
+│  R$ 4.180         │ │  R$ 5.920         │ │  R$ 9.740         │
+│  ▁▂▂▃▃▃▃▃▃        │ │  ▁▂▃▄▅▅▆▆▆        │ │  ▁▃▅▆▇█████       │
+│  aceitos/s   142  │ │  aceitos/s   380  │ │  aceitos/s  1.910 │
+│  conflitos/s 2.4k │ │  espera lock 41ms │ │  inbox         3  │
+│  p95       890ms  │ │  p95        210ms │ │  p95         12ms │
+└───────────────────┘ └───────────────────┘ └───────────────────┘
+```
+
+O que se vê em dez segundos de GIF: a coluna otimista travando e enchendo de conflito enquanto a single-writer continua fluindo. É a tese do projeto inteira, sem ler uma linha do README.
+
+### Stack
+
+**React com TypeScript, via Vite.** Sem router, sem biblioteca de estado, sem framework de UI. Três dependências de runtime no total.
+
+TypeScript aqui não é preferência, é requisito funcional: o painel consome payloads de WebSocket de três serviços em paralelo, e um campo renomeado no Go precisa quebrar o build do front, não aparecer como `undefined` no meio de um GIF de demonstração.
+
+### Contrato tipado
+
+Um único arquivo de tipos espelha os payloads do `auctiond`, gerado a partir das structs Go para não sair de sincronia na mão.
 
 ```bash
-# Rodar load test
-k6 run tests/load/bid-storm.js
-
-# Exportar métricas pro Prometheus → Grafana
-k6 run --out experimental-prometheus-rw \
-  -e K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write \
-  tests/load/bid-storm.js
+# make types
+go run github.com/gzuidhof/tygo@latest generate
 ```
 
-### Observabilidade — Prometheus + Grafana
+```ts
+// web/src/types.gen.ts (gerado)
+export type Strategy = "optimistic" | "pessimistic" | "shard";
 
-Cada serviço expõe `/metrics` no formato Prometheus. O Prometheus faz scrape a cada 15s e alimenta dashboards Grafana.
+export interface AuctionTick {
+  auctionId: string;
+  strategy: Strategy;
+  highestBid: number;
+  seq: number;
+  acceptedPerSec: number;
+  conflictsPerSec: number;
+  inboxDepth: number;
+  p95ConfirmMs: number;
+  ts: string;
+}
+```
 
-**Dashboards Grafana:**
+### Um hook, e só
 
-| Dashboard | Métricas chave |
-|---|---|
-| **Bid Performance** | Latência p50/p95/p99, taxa de conflitos, throughput |
-| **SQS Queues** | Profundidade das filas, age of oldest message, DLQ count |
-| **WebSocket Connections** | Conexões ativas, mensagens/s, reconexões |
-| **K6 Load Tests** | VUs ativos, request rate, error rate, thresholds |
-| **EKS Resources** | CPU/memória por pod, restarts, HPA scaling events |
+Todo o estado do painel cabe em um hook por estratégia. Nada mais que isso é necessário.
+
+```ts
+export function useAuctionFeed(strategy: Strategy, url: string) {
+  const [tick, setTick] = useState<AuctionTick | null>(null);
+  const [history, setHistory] = useState<number[]>([]);
+  const [status, setStatus] = useState<"connecting" | "live" | "down">("connecting");
+
+  useEffect(() => {
+    const ws = new WebSocket(url);
+    ws.onopen = () => setStatus("live");
+    ws.onclose = () => setStatus("down");
+    ws.onmessage = (e) => {
+      const t: AuctionTick = JSON.parse(e.data);
+      setTick(t);
+      setHistory((h) => [...h.slice(-59), t.highestBid]);
+    };
+    return () => ws.close();
+  }, [url]);
+
+  return { tick, history, status };
+}
+```
+
+Três componentes: `<App>` monta as colunas, `<StrategyPanel>` renderiza uma delas, `<Sparkline>` desenha o histórico em SVG puro. O `status` importa: quando o `auctiond` cai durante o `make chaos`, a coluna fica vermelha e volta sozinha, o que é a evidência visual da reassunção de shard.
+
+### O detalhe que importa
+
+O servidor emite um tick agregado a cada 100ms por leilão, **não um evento por lance**. Sob 1000 VUs isso seria dezenas de milhares de mensagens por segundo por cliente, e o gargalo passaria a ser o navegador em vez do sistema testado.
+
+Essa decisão é o motivo de o painel valer como teste e não só como vitrine: cliente lento não pode virar backpressure no hub de WebSocket. Se o `shard_inbox_depth` subir porque uma aba travou, o acoplamento está errado e o bug é real.
+
+### Fora de escopo no front
+
+Sem login, sem catálogo, sem formulário de lance, sem perfil, sem histórico. Quem dá lance aqui é o k6. Interface de e-commerce faria o projeto ser lido como CRUD com front bonito, que é exatamente o oposto do posicionamento.
 
 ---
 
-## Contratos entre Serviços
-
-### Eventos SNS/SQS (JSON Schema)
-
-```json
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "BidPlaced",
-  "type": "object",
-  "required": ["auction_id", "user_id", "amount", "timestamp"],
-  "properties": {
-    "auction_id": { "type": "string", "format": "uuid" },
-    "user_id": { "type": "string", "format": "uuid" },
-    "amount": { "type": "number", "minimum": 0 },
-    "timestamp": { "type": "string", "format": "date-time" }
-  }
-}
-```
-
-### gRPC — Bid Service (Proto)
-
-```protobuf
-syntax = "proto3";
-package bid;
-
-service BidService {
-  rpc PlaceBid (PlaceBidRequest) returns (PlaceBidResponse);
-  rpc GetHighestBid (GetHighestBidRequest) returns (BidInfo);
-}
-
-message PlaceBidRequest {
-  string auction_id = 1;
-  string user_id = 2;
-  double amount = 3;
-  int32 expected_version = 4;
-  string idempotency_key = 5;
-}
-
-message PlaceBidResponse {
-  bool success = 1;
-  string bid_id = 2;
-  int32 new_version = 3;
-}
-```
-
----
-
-## Estrutura do Projeto
+## Estrutura
 
 ```
-leilao/
-├── contracts/                    # Contratos compartilhados (language-agnostic)
-│   ├── proto/bid.proto
-│   └── events/*.schema.json
-├── services/
-│   ├── gateway/                  # 🚪 TypeScript/NestJS
-│   ├── auth/                     # 🔐 TypeScript/NestJS
-│   ├── auction/                  # 🏛️ TypeScript/NestJS
-│   ├── bid/                      # 💰 Go (Gin + gRPC)
-│   │   ├── cmd/server/main.go
-│   │   ├── internal/{bid,middleware,metrics,grpc}/
-│   │   └── pkg/{redis,messaging}/
-│   ├── notification/             # 📢 Python (FastAPI + Socket.io)
-│   └── closure-worker/           # ⚙️ Python (SQS consumer)
-├── k8s/                          # ☸️ Kubernetes manifests
-│   ├── {bid-service,gateway,auction-service,notification,closure-worker}/
-│   └── monitoring/{prometheus,grafana}/
-├── infra/                        # 🏗️ Terraform
-│   ├── modules/{eks,rds,elasticache,sqs-sns,ecr}/
-│   └── environments/{dev,staging,prod}.tfvars
-├── tests/
-│   ├── integration/
-│   ├── e2e/
-│   └── load/                     # 🏋️ Grafana K6
-│       ├── bid-storm.js
-│       ├── auction-lifecycle.js
-│       └── websocket-stress.js
-├── .github/workflows/{ci,deploy}.yml
-├── scripts/{proto-gen.sh,localstack-init.sh}
-├── docker-compose.yml            # Dev local com LocalStack
-├── Makefile
-└── README.md
+auction-system/
+├── cmd/
+│   ├── auctiond/          # API + WebSocket + shards
+│   ├── closerd/           # worker de fechamento
+│   └── checker/           # verificador de invariantes
+├── internal/
+│   ├── bid/
+│   │   ├── engine.go      # interface BidEngine
+│   │   ├── optimistic.go
+│   │   ├── pessimistic.go
+│   │   └── shard.go
+│   ├── idem/              # middleware de idempotência
+│   ├── stream/            # produtor e consumer group Redis
+│   ├── ws/                # hub de WebSocket
+│   └── metrics/
+├── migrations/
+├── bench/
+│   ├── bid-storm.js
+│   ├── run-matrix.sh      # 3 estratégias x 3 contenções
+│   └── results/           # saída versionada, com ambiente e commit
+├── chaos/
+│   └── scenarios.sh
+├── deploy/
+│   ├── docker-compose.yml
+│   └── grafana/           # dashboards provisionados
+├── web/                   # painel React + TS (Vite)
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── types.gen.ts   # gerado das structs Go
+│   │   ├── hooks/useAuctionFeed.ts
+│   │   └── components/{StrategyPanel,Sparkline}.tsx
+│   └── vite.config.ts
+└── Makefile
 ```
 
 ---
 
-## Como Rodar
+## Como rodar
 
 ```bash
-# Dev local (LocalStack simula SNS/SQS)
-make dev-up
-
-# Testes
-make test-go && make test-ts && make test-py
-
-# Load test
-make load-test
-
-# Deploy AWS
-cd infra/ && terraform apply -var-file=environments/staging.tfvars
-make docker-build && make docker-push
-make k8s-deploy ENV=staging
+make up                              # postgres, redis, prometheus, grafana
+make run STRATEGY=shard              # sobe auctiond e closerd
+make bench                           # matriz completa, gera bench/results/
+make check                           # verificador de invariantes
+make chaos                           # injeção de falhas sob carga
+make types                           # regenera web/src/types.gen.ts das structs Go
+make web                             # painel em http://localhost:5173
 ```
 
 ---
 
-## Resumo dos Desafios Técnicos
+## Fora de escopo
 
-| # | Desafio | Solução | Linguagem | Tecnologia |
-|---|---|---|---|---|
-| 🏁 | Concorrência | Controle Otimista c/ Versionamento | Go | RDS PostgreSQL |
-| 🔄 | Idempotência | Filtro c/ chave única distribuída | Go | ElastiCache Redis |
-| 📉 | Consistência Eventual | Workers assíncronos c/ retry nativo | Python | SNS + SQS + DLQ |
-| 📡 | Tempo Real | Push bidirecional c/ salas | Python | Socket.io + ElastiCache |
-| 🔗 | Comunicação | gRPC + eventos assíncronos | Go ↔ TS | Protobuf + SNS/SQS |
-| ☸️ | Orquestração | Auto-scaling, self-healing | — | Amazon EKS + HPA |
-| 🏋️ | Load Testing | Spike tests c/ métricas custom | JS | Grafana K6 |
-| 📊 | Observabilidade | Métricas, dashboards, alertas | — | Prometheus + Grafana |
-| 🏗️ | Infraestrutura | Tudo como código | — | Terraform + GitHub Actions |
+Registrado de propósito, porque saber o que não fazer é parte do desenho:
+
+| Não tem | Por quê |
+| --- | --- |
+| Múltiplas linguagens | Escolher três linguagens para seis serviços adiciona manutenção, não capacidade. A comparação entre estratégias exige a mesma linguagem nas três, ou o benchmark não significa nada |
+| API Gateway, Auth Service | Não mudam nenhuma curva do gráfico. Autenticação é JWT validado no próprio serviço |
+| gRPC | Otimização de transporte para um problema que não é de transporte |
+| Kubernetes, Terraform, EKS | Custo real e semanas de trabalho para não alterar nenhum resultado. Orquestração é assunto de outro projeto |
+| SNS/SQS | Redis Streams entrega as mesmas garantias localmente e deixa o mecanismo de retentativa visível |
+| Microserviços | Dois processos, e o segundo existe apenas porque precisa ser morto no teste de caos |
+
+**Regra de escopo:** uma pergunta, três implementações, um benchmark. Toda ideia nova passa pelo filtro "isso muda o gráfico?". Se não muda, fica de fora.
 
 ---
 
-## Dependências por Serviço
+## Roadmap
 
-### Go — Bid Service
-```
-github.com/gin-gonic/gin
-github.com/redis/go-redis/v9
-github.com/aws/aws-sdk-go-v2/service/sns
-google.golang.org/grpc
-github.com/lib/pq
-github.com/prometheus/client_golang
-```
-
-### TypeScript — Gateway / Auth / Auction
-```json
-{
-  "@nestjs/common": "^10.0.0",
-  "@nestjs/microservices": "^10.0.0",
-  "@nestjs/typeorm": "^10.0.0",
-  "@grpc/grpc-js": "^1.9.0",
-  "@aws-sdk/client-sns": "^3.400.0",
-  "@aws-sdk/client-sqs": "^3.400.0",
-  "typeorm": "^0.3.0",
-  "prom-client": "^15.0.0"
-}
-```
-
-### Python — Notification / Closure Worker
-```
-fastapi>=0.104.0
-uvicorn>=0.24.0
-python-socketio>=5.10.0
-aioboto3>=12.0.0
-asyncpg>=0.29.0
-pydantic>=2.5.0
-prometheus-client>=0.19.0
-```
+| Etapa | Entrega |
+| --- | --- |
+| 1 | Schema, migrations, `docker compose`, engine otimista, teste de invariantes básico |
+| 2 | Engine pessimista, middleware de idempotência, duplicatas injetadas no k6 |
+| 3 | Engine single-writer com shards, journal assíncrono, métricas de profundidade |
+| 4 | Fechamento via Redis Streams, `closerd`, cenários de caos |
+| 5 | Matriz de benchmark, dashboards Grafana |
+| 5b | Tick agregado no WebSocket, geração de tipos, painel React de três colunas |
+| 6 | Escrita dos resultados, gráfico de cruzamento, README final |
