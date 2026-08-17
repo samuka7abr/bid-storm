@@ -79,13 +79,14 @@ docs/
 
 | Documento | Assunto |
 | --- | --- |
-| [decisoes/etapa-1.md](decisoes/etapa-1.md) | As 18 decisões de design da etapa 1, cada uma com a alternativa descartada |
+| [decisoes/etapa-1.md](decisoes/etapa-1.md) | As 24 decisões de design da etapa 1, cada uma com a alternativa descartada. As de 19 a 24 emendam `estrategias.md` e `api.md` |
 
 **`specs/` — o que construir**
 
 | Spec | Entrega |
 | --- | --- |
 | [specs/etapa-1/01-spec-fundacao.md](specs/etapa-1/01-spec-fundacao.md) | Compose, migration `001`, pool, `/readyz` com fail-fast de schema, `cmd/seed` |
+| [specs/etapa-1/02-spec-engine-otimista.md](specs/etapa-1/02-spec-engine-otimista.md) | `BidEngine`, engine otimista, envelope, as três rotas, métricas de lance, suíte de conformidade |
 
 Modelo em [specs/spec-model.md](specs/spec-model.md).
 

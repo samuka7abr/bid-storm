@@ -167,3 +167,79 @@ Etapa 1 leva `bid_confirm_duration_seconds`, `bid_outcomes_total{outcome}` e as 
 E `bids_exhausted` é número de manchete do relatório.
 
 **Por quê:** um apostador real desiste por tempo, não por contagem; os dois limites juntos modelam isso. `bids_exhausted` **é** o colapso do otimista tornado visível — se a taxa passar de ~20%, `MAX_RETRIES` está mascarando o efeito e precisa subir.
+
+---
+
+## Emendas da spec 02
+
+As decisões de 1 a 18 foram tomadas antes da primeira linha de código. As de 19 a 24 foram tomadas ao desenhar a [spec 02](../specs/etapa-1/02-spec-engine-otimista.md), e quatro delas **emendam** o que já estava publicado em `projeto/estrategias.md` e `projeto/api.md`. Onde houver divergência, vale o que está aqui.
+
+---
+
+### 19. O caminho feliz do otimista é um statement, não uma transação
+
+`UPDATE` e `INSERT` numa CTE só, sem `Begin`/`Commit`. Emenda o código ilustrativo de [estrategias.md](../projeto/estrategias.md#otimista).
+
+**Por quê:** a versão com transação são quatro round-trips por tentativa, com a conexão presa nos quatro. A CTE é um, e continua atômica.
+
+A pessimista não pode fazer o mesmo, porque `SELECT ... FOR UPDATE` exige transação aberta. Isso é deliberado: **precisar de transação é um custo real do pessimismo**, e dar uma transação de graça ao otimista para nivelar os dois esconderia esse custo e pesaria a balança a favor da hipótese do projeto. Os quatro invariantes de método fixam pool, CPU, memória e estado inicial — nenhum deles pede paridade de round-trips.
+
+**Consequência:** o otimista entra no benchmark na melhor forma que o mecanismo permite. Se ele colapsar mesmo assim, o resultado é adverso à hipótese e sobrevive ao revisor mais hostil, que é a única espécie de resultado que vale publicar.
+
+---
+
+### 20. `Conflict` tem precedência sobre `TooLow`
+
+A ordem do `classify` passa a ser `NotFound` → `Closed` → `Conflict` → `TooLow`. Emenda a ordem de [estrategias.md](../projeto/estrategias.md#otimista), que checava o valor antes da versão.
+
+**Por quê:** a ordem original esvazia a métrica-chave do otimista. O apostador da decisão 5 re-mira em `minNextBid`; enquanto a requisição viaja, outro VU passa na frente; a rejeição chega com versão velha **e** valor abaixo do novo mínimo. Sob alta contenção esse é o caso quase universal, e com o valor sendo checado primeiro toda rejeição vira `too_low` — `bid_outcomes_total{outcome="conflict"}` vai a zero exatamente na célula em que a tese precisa dela, e o otimista passa a produzir a mesma tabela de desfechos que o pessimista.
+
+Com a ordem invertida, `Conflict` significa *o snapshot do cliente ficou velho* e `TooLow` significa *o cliente estava atualizado e ainda assim mandou pouco*.
+
+**Não reabre a decisão 1.** O lance de R$ 5 num leilão de R$ 9.000 não vira retentativa infinita, porque o corpo carrega `minNextBid` e o apostador re-mira nele, e porque `MAX_RETRIES` e `BID_DEADLINE` limitam de qualquer forma. A decisão 1 proíbe colapsar os quatro desfechos num só; a ordem entre eles é outra escolha.
+
+---
+
+### 21. `Current` só existe quando o leilão existe
+
+`Outcome` ganha `Invalid` (400). `NotFound`, `Invalid` e erro de infra respondem com um `ErrorResponse` sem estado. Emenda `Current AuctionState // SEMPRE preenchido` de [estrategias.md](../projeto/estrategias.md#a-interface) e a última linha da decisão 10, e acrescenta uma linha à tabela de [api.md](../projeto/api.md#rejeitado).
+
+**Por quê:** "sempre preenchido" é literalmente impossível em `NotFound` — não há leilão de onde tirar estado. Publicar `currentHighestBid: 0` num `404` seria o contrato afirmando que um leilão inexistente vale zero centavos, e o painel da etapa 5b renderizaria esse zero.
+
+`Invalid` existe porque `expectedVersion` é obrigatório só no otimista, e `api.md` proíbe o handler de ramificar por estratégia — condição do experimento, já que um `switch` no handler faria a comparação medir também o handler. Com o desfecho vindo da engine, o handler continua sendo uma tabela de mapeamento e a interface continua com um método só.
+
+**Consequência de qualidade:** `AuctionStateView` é embutida nas structs de `201`, `409`, `422` e `410`, então o compilador garante o que a decisão 2 exige — nenhuma dessas quatro respostas pode nascer sem estado. E `bid_outcomes_total{outcome="invalid"}` acima de zero durante o benchmark denuncia k6 mal configurado, de graça.
+
+---
+
+### 22. O relógio do Postgres é a autoridade sobre `ends_at`
+
+O `SELECT` do `classify` e o de `GET /auctions/:id` devolvem `now()` junto das colunas, e é esse instante que alimenta `IsClosed`. Emenda o `time.Now()` do `classify` em [estrategias.md](../projeto/estrategias.md#otimista).
+
+**Por quê:** o `UPDATE` decide o aceite com `now() < ends_at`, ou seja, com o relógio do Postgres. Se a classificação decidisse com o relógio do container do `auctiond`, um skew de poucos milissegundos produziria `410 auction_closed` com `retryable: false` para um lance que o banco teria aceito, e o VU desistiria de um lance válido.
+
+Isso morde na borda do `ends_at`, que é o cenário inteiro do projeto — mil pessoas no último segundo. O erro seria enviesado, não aleatório, e apareceria como uma diferença entre estratégias que na verdade é uma diferença entre relógios.
+
+**Custo:** zero. A coluna extra vem no `SELECT` que já roda.
+
+---
+
+### 23. As métricas de lance são observadas por um decorator sobre `BidEngine`
+
+`Instrument(next BidEngine, reg, strategy)` embrulha qualquer implementação. Nenhuma engine chama Prometheus por dentro.
+
+**Por quê:** se cada engine instrumentasse a si mesma, nada no compilador impediria o shard de cronometrar a partir de um ponto mais generoso que o otimista. Esse é o viés silencioso que os quatro invariantes de método existem para impedir, e é a primeira coisa que um revisor procuraria ao ver o shard ganhar. Com o decorator, as três são medidas na mesma fronteira porque só existe uma fronteira.
+
+**Exceção registrada:** `bid_accept_duration_seconds` — o instante da decisão em memória — só existe dentro do shard, e é instrumentada por dentro dele na etapa 3. `confirm` continua vindo do decorator nas três, que é o que torna o gap da decisão 8 uma comparação honesta.
+
+---
+
+### 24. A suíte de conformidade valida a história inteira por replay
+
+Depois do teste de concorrência, a suíte lê os lances em ordem de `seq` e reexecuta a regra a cada passo: sequência `1..A` sem buraco, cada `amount_cents` maior ou igual ao anterior mais `min_increment_cents`, total batendo com os `Accepted` contados, estado reconstruído batendo com a linha de `auctions`.
+
+**Por quê:** asserir apenas que `seq` é único e crescente prova o `UNIQUE (auction_id, seq)`, não a engine — a suíte estaria confirmando o Postgres.
+
+O alvo real é o shard da etapa 3. O otimista carrega `highest_bid_cents + min_increment_cents <= $1` dentro do `WHERE`, então o banco o impede de aceitar lance inválido. O shard decide em memória, sem `WHERE` nenhum: uma corrida ali aceitaria um lance abaixo do mínimo no meio da história, deixaria a sequência perfeita, e passaria despercebida por qualquer asserção mais fraca — para reaparecer como um número estranho no `cmd/checker`, depois do benchmark.
+
+É o que faz a decisão 11 valer o que promete: a engine nova passa na suíte ou está errada.
