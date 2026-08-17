@@ -1,7 +1,8 @@
 // Command auctiond serves the auction API.
 //
-// In this spec it serves health and metrics only: the bid engine and its routes
-// arrive in spec 02, against the database and the process this one erects.
+// It runs exactly one bid strategy per process, chosen at boot by BID_STRATEGY:
+// the benchmark compares three engines under one configuration, and a process
+// that could switch mid-run would be measuring the switch.
 package main
 
 import (
@@ -16,10 +17,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/samuka7abr/bid-storm/internal/app"
 	"github.com/samuka7abr/bid-storm/internal/config"
 	"github.com/samuka7abr/bid-storm/internal/db"
 	"github.com/samuka7abr/bid-storm/internal/httpapi"
 	"github.com/samuka7abr/bid-storm/internal/metrics"
+	"github.com/samuka7abr/bid-storm/internal/store"
 )
 
 const shutdownGrace = 10 * time.Second
@@ -57,8 +60,6 @@ func run(log *slog.Logger) error {
 		found = schemaFault.Found
 	}
 
-	// BID_STRATEGY is read and logged here but selects nothing yet: the key
-	// exists so spec 02 only has to plug the engine into it.
 	log.Info("auctiond boot",
 		"strategy", cfg.BidStrategy,
 		"pool_size", cfg.DBPoolSize,
@@ -76,13 +77,23 @@ func run(log *slog.Logger) error {
 	registry := metrics.NewRegistry()
 	metrics.RegisterPool(registry, pool)
 
+	// A strategy with no engine behind it aborts the boot instead of serving a
+	// whole benchmark cell's worth of 503s.
+	engine, err := app.NewEngine(cfg.BidStrategy, pool, registry)
+	if err != nil {
+		return err
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.New(httpapi.Deps{
-			Ping:    pool.Ping,
-			Schema:  func(ctx context.Context) error { return db.CheckSchema(ctx, pool) },
-			Metrics: metrics.Handler(registry),
+			Ping:     pool.Ping,
+			Schema:   func(ctx context.Context) error { return db.CheckSchema(ctx, pool) },
+			Metrics:  metrics.Handler(registry),
+			Engine:   engine,
+			Auctions: store.New(pool),
+			Log:      log,
 		}),
 	}
 
