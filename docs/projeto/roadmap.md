@@ -19,6 +19,7 @@ Cada etapa é quebrada em specs do tamanho de um PR, em `docs/specs/etapa-n/`:
 | Spec | Entrega |
 | --- | --- |
 | [etapa-1/01-spec-fundacao.md](../specs/etapa-1/01-spec-fundacao.md) | Compose com recursos verificados, migration `001`, pool, `/readyz` com fail-fast de schema, `cmd/seed` |
+| [etapa-1/02-spec-engine-otimista.md](../specs/etapa-1/02-spec-engine-otimista.md) | `BidEngine`, engine otimista em um statement, envelope de três formas, as três rotas, métricas de lance, suíte de conformidade |
 
 As decisões de design da etapa 1 estão em [decisoes/etapa-1.md](../decisoes/etapa-1.md). Várias delas foram tomadas cedo de propósito: o contrato de durabilidade e o envelope uniforme de resposta precisam existir antes da primeira engine, ou as etapas 2 e 3 quebrariam a API que a etapa 1 publicou.
 
