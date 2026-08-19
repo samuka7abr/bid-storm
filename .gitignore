@@ -1,3 +1,4 @@
 .env
 /bin/
 /bench/auctions.json
+/bench/results/

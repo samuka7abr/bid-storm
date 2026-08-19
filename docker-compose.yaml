@@ -82,6 +82,27 @@ services:
           cpus: '2.0'
           memory: 1G
 
+  # Never on the host, for the same reason auctiond is not: a load generator
+  # without a resource limit has no limit at all, and when it saturates the
+  # queue forms in the client while the client's clock is already running — the
+  # effect arrives looking like server latency. Under `profiles: [bench]` so
+  # `make up` never starts it, and speaking to auctiond over the compose network
+  # so the host port-forward is out of the hot path.
+  k6:
+    image: grafana/k6:0.55.0
+    profiles: [bench]
+    volumes:
+      - ./bench:/bench
+    environment:
+      BASE_URL: http://auctiond:8080
+    cpus: 2.0
+    mem_limit: 1G
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+
   prometheus:
     image: prom/prometheus:v2.55.1
     volumes:
