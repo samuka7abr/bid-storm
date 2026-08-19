@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Writes, to stdout, everything a published number depends on.
 #
+# Redis is in here from etapa 2 on: the idempotency middleware put it in the hot
+# path of the three engines, and a service with no limit on a loaded host is a
+# hidden variable inside a published number.
+#
 # The limits come from `docker inspect` and not from the YAML, for the same
 # reason as C1 of spec 01: a limit the Compose silently ignored is not a limit,
 # and the env.json of a number that gets published cannot lie about it.
@@ -55,6 +59,7 @@ jq -n \
   --arg k6Version "$(docker compose run --rm --no-deps k6 version 2> /dev/null | tr -d '\r' | head -1 || echo unknown)" \
   --argjson auctiondLimits "$(limits_of auctiond)" \
   --argjson postgresLimits "$(limits_of postgres)" \
+  --argjson redisLimits "$(limits_of redis)" \
   --argjson k6Cpus "${K6_CPUS:-0}" \
   --argjson k6Memory "${K6_MEM_BYTES:-0}" \
   --argjson cpuPctPeak "${GENERATOR_CPU_PCT_PEAK:-0}" \
@@ -69,6 +74,7 @@ jq -n \
     images: {postgres: $pgImage, auctiond: $auctiondImage, k6: $k6Image},
     versions: {postgres: $pgVersion, go: $goVersion, k6: $k6Version},
     limits: {auctiond: $auctiondLimits, postgres: $postgresLimits,
+             redis: $redisLimits,
              k6: {cpus: $k6Cpus, memoryBytes: $k6Memory}},
     generator: {cpuPctPeak: $cpuPctPeak, saturated: ($cpuPctPeak > 90)}
   }'
