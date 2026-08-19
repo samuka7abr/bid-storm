@@ -15,12 +15,13 @@ import (
 
 	"github.com/samuka7abr/bid-storm/internal/bid"
 	"github.com/samuka7abr/bid-storm/internal/bid/optimistic"
+	"github.com/samuka7abr/bid-storm/internal/bid/pessimistic"
 	"github.com/samuka7abr/bid-storm/internal/metrics"
 )
 
-// The three values BID_STRATEGY accepts across the project's lifetime. Two of
-// them are not implemented yet, and they are named here anyway so the failure
-// says which etapa they arrive in.
+// The three values BID_STRATEGY accepts across the project's lifetime. One of
+// them is not implemented yet, and it is named here anyway so the failure says
+// which etapa it arrives in.
 const (
 	StrategyOptimistic  = "optimistic"
 	StrategyPessimistic = "pessimistic"
@@ -39,7 +40,12 @@ func NewEngine(strategy string, pool *pgxpool.Pool, reg prometheus.Registerer) (
 	case StrategyOptimistic:
 		return metrics.Instrument(optimistic.New(pool), reg, strategy), nil
 	case StrategyPessimistic:
-		return nil, fmt.Errorf("BID_STRATEGY=%s: the pessimistic engine arrives in etapa 2", strategy)
+		// The lock observer is built here, off the same registry, because
+		// internal/metrics owns every series name and the engine is handed a
+		// one-method interface instead. Wrapping still happens outside it: what
+		// compares the three strategies is measured at one boundary, and only
+		// what describes this mechanism is measured from within (decisão 28).
+		return metrics.Instrument(pessimistic.New(pool, metrics.NewLockWait(reg)), reg, strategy), nil
 	case StrategyShard:
 		return nil, fmt.Errorf("BID_STRATEGY=%s: the single-writer engine arrives in etapa 3", strategy)
 	default:
