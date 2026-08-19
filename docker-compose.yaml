@@ -40,6 +40,18 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+    # Limited from etapa 2 on, and bench/env.sh records it: the idempotency
+    # middleware put Redis in the hot path of the three engines, so it is now
+    # part of what the third method invariant fixes. One CPU because Redis
+    # executes commands on a single thread anyway, and 512M against entries of a
+    # couple hundred bytes that expire in five minutes.
+    cpus: 1.0
+    mem_limit: 512M
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
 
   # Runs to completion before auctiond starts. No Go dependency on
   # golang-migrate: auctiond only has to *read* schema_migrations.

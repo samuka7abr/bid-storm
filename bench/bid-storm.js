@@ -47,7 +47,15 @@ const attempts = new Counter('bids_attempts');
 // Distribution rather than a mean (decisão 16), and sampled only on accept:
 // mixing in the bidders that gave up would produce a number that is neither
 // amplification nor abandonment rate. Those are in bids_exhausted.
-const attemptsPerAccept = new Trend('bid_attempts_per_accept');
+//
+// client_, because bid_attempts_per_accept is now the server's, observed by the
+// idempotency middleware. The two do not measure the same thing and both are
+// kept: this one counts the attempts the client MADE, the server's counts the
+// ones that ARRIVED, and under 1000 VUs a bidder gives up on BID_DEADLINE while
+// the server still holds its request. The gap between the curves is that loss
+// (decisão 38). Same name in two places would be the surest way for somebody to
+// plot the wrong one.
+const clientAttemptsPerAccept = new Trend('client_attempts_per_accept');
 // The client twin of bid_confirm_duration_seconds{strategy}. The gap between
 // the two curves is queueing ahead of the handler, which is what separates "the
 // server is slow" from "the client is in line".
@@ -143,11 +151,47 @@ function userID() {
   return `00000000-0000-4000-8000-${String(__VU).padStart(12, '0')}`;
 }
 
+// Drawn once, in the init context, and it is not decoration: __VU and __ITER
+// both restart at zero between the warmup and the measured run, so without it
+// the measured run would collect the warmup's stored answers as replays — a
+// whole cell of 201s that wrote no row, and nothing in the report saying so.
+const NONCE = hex(18);
+
+function hex(n) {
+  let out = '';
+  for (let i = 0; i < n; i++) out += Math.floor(Math.random() * 16).toString(16);
+  return out;
+}
+
+// One key per LOGICAL BID, kept across every retry of it (decisão 31). The
+// bidder re-aims after each rejection, so attempt 2 carries a different body
+// from attempt 1 by construction: a key per request would either break the
+// thread the server needs or bounce the bidder off its own middleware.
+//
+// Shaped as a v4 UUID because the middleware validates it as it validates
+// X-User-Id, and unique by construction: every hex digit of the iteration and
+// of the VU is in there, next to the nonce of this k6 process. Four digits hold
+// 65535 VUs and the largest scenario of the project runs 1000.
+function bidKey() {
+  const vu = __VU.toString(16).padStart(4, '0');
+  const iter = __ITER.toString(16).padStart(8, '0');
+  return `${iter}-${vu}-4${NONCE.slice(0, 3)}-8${NONCE.slice(3, 6)}-${NONCE.slice(6)}`;
+}
+
 export default function () {
   const auction = auctions[Math.floor(Math.random() * auctions.length)];
   const state = stateOf(auction);
   const url = `${BASE_URL}/auctions/${auction.id}/bids`;
-  const params = { headers: { 'Content-Type': 'application/json', 'X-User-Id': userID() } };
+  const params = {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': userID(),
+      // Sent on every attempt of this logical bid, and never re-sent on purpose:
+      // injecting duplicates is spec 03. Here the header exists so the column,
+      // the metric and the middleware are exercised by the real load.
+      'X-Idempotency-Key': bidKey(),
+    },
+  };
   const deadline = Date.now() + BID_DEADLINE;
 
   for (let attempt = 0; attempt < MAX_RETRIES && Date.now() < deadline; attempt++) {
@@ -162,7 +206,7 @@ export default function () {
       absorb(state, accept);
       accepted.add(1);
       seqSeen.add(accept.seq);
-      attemptsPerAccept.add(attempt + 1);
+      clientAttemptsPerAccept.add(attempt + 1);
       confirmLatency.add(res.timings.duration);
       return;
     }
@@ -210,7 +254,7 @@ export function handleSummary(data) {
     attempts: count(data, 'bids_attempts'),
     maxSeqSeen: trend(data, 'seq_seen').max,
     confirmLatencyMs: trend(data, 'bid_confirm_latency'),
-    attemptsPerAccept: trend(data, 'bid_attempts_per_accept'),
+    clientAttemptsPerAccept: trend(data, 'client_attempts_per_accept'),
   };
 
   const dir = `${RESULTS}/${RUN}`;

@@ -212,9 +212,10 @@ func TestPlaceBidRejectsBeforeTheEngine(t *testing.T) {
 }
 
 func router(engine bid.BidEngine, auctions httpapi.AuctionStore) http.Handler {
+	// No readiness conditions and no idempotency middleware: what is under test
+	// here is the table that maps an Outcome to a response, and the bid handler
+	// does not know either of them exists.
 	return httpapi.New(httpapi.Deps{
-		Ping:     ok,
-		Schema:   ok,
 		Metrics:  http.NotFoundHandler(),
 		Engine:   engine,
 		Auctions: auctions,

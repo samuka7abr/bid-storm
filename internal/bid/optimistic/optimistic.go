@@ -51,7 +51,7 @@ func (e *Engine) PlaceBid(ctx context.Context, req bid.BidRequest) (bid.BidResul
 	bidID := uuid.New()
 	var seq, minIncrement int64
 	err := e.pool.QueryRow(ctx, placeBid,
-		req.AmountCents, req.UserID, req.AuctionID, *req.ExpectedVersion, bidID,
+		req.AmountCents, req.UserID, req.AuctionID, *req.ExpectedVersion, bidID, req.IdempotencyKey,
 	).Scan(&seq, &minIncrement)
 
 	switch {

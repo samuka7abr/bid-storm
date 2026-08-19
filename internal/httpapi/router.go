@@ -11,17 +11,21 @@ import (
 )
 
 // Deps is what the router needs from the rest of the process. The readiness
-// conditions arrive as functions, so the HTTP layer never learns that there is
-// a pgx pool behind them and the tests can fail one condition at a time. Engine
-// arrives as the interface for the same reason and a stronger one: no handler
-// may know which strategy is running.
+// conditions arrive as named functions, so the HTTP layer never learns that
+// there is a pgx pool or a Redis client behind them and the tests can fail one
+// condition at a time. Engine arrives as the interface for the same reason and a
+// stronger one: no handler may know which strategy is running.
+//
+// Idempotency arrives already built, for the third time the same reason: this
+// package must not learn that Redis exists, and the bid handler must not learn
+// that idempotency does.
 type Deps struct {
-	Ping     Probe
-	Schema   Probe
-	Metrics  http.Handler
-	Engine   bid.BidEngine
-	Auctions AuctionStore
-	Log      *slog.Logger
+	Ready       []Condition
+	Metrics     http.Handler
+	Engine      bid.BidEngine
+	Auctions    AuctionStore
+	Idempotency gin.HandlerFunc
+	Log         *slog.Logger
 }
 
 // New builds the router.
@@ -39,14 +43,22 @@ func New(deps Deps) *gin.Engine {
 	r.Use(gin.Recovery())
 
 	r.GET("/healthz", Healthz)
-	r.GET("/readyz", Readyz(deps.Ping, deps.Schema))
+	r.GET("/readyz", Readyz(deps.Ready...))
 	r.GET("/metrics", gin.WrapH(deps.Metrics))
 
 	r.POST("/auctions", CreateAuction(deps.Auctions, deps.Log))
 	r.GET("/auctions/:id", GetAuction(deps.Auctions, deps.Log))
 	// Identity guards the bid route alone: nothing in the schema owns an
-	// auction, so creating one asks for no identity.
-	r.POST("/auctions/:id/bids", RequireUserID(), PlaceBid(deps.Engine, deps.Log))
+	// auction, so creating one asks for no identity. Idempotency comes after
+	// it, and before the handler — the whole chain of a bid, in order, and the
+	// only route either of them is mounted on. A nil middleware leaves the
+	// route as etapa 1 had it, which is what lets a test exercise the handler
+	// without a Redis behind it.
+	bidChain := []gin.HandlerFunc{RequireUserID()}
+	if deps.Idempotency != nil {
+		bidChain = append(bidChain, deps.Idempotency)
+	}
+	r.POST("/auctions/:id/bids", append(bidChain, PlaceBid(deps.Engine, deps.Log))...)
 
 	return r
 }

@@ -70,6 +70,11 @@ reset() {
   DATABASE_URL="$DB_URL" ./bin/seed -truncate \
     -auctions="$AUCTIONS" -ends-in="$ENDS_IN" -min-increment="$MIN_INCREMENT" -out="$MANIFEST"
   pg -c 'VACUUM ANALYZE;' > /dev/null
+  # The state a cell opens on now includes Redis: an idempotency entry that
+  # survived from the warmup would answer the measured cell with a stored 201
+  # that wrote no row. The nonce inside bid-storm.js covers whoever runs k6 by
+  # hand; this covers the matrix.
+  docker compose exec -T redis redis-cli FLUSHALL > /dev/null
 }
 
 k6_run() {

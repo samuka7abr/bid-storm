@@ -36,12 +36,16 @@ func get(t *testing.T, r http.Handler, path string) (int, map[string]string) {
 	return rec.Code, body
 }
 
-// Liveness must not depend on the database, or a schema divergence gets read as
-// a dead process and restarted forever.
-func TestHealthzIsGreenWithoutDatabase(t *testing.T) {
+// Liveness must not depend on the database or on Redis, or a schema divergence
+// — or a Redis that went away — gets read as a dead process and restarted
+// forever.
+func TestHealthzIsGreenWithoutItsInfrastructure(t *testing.T) {
 	r := httpapi.New(httpapi.Deps{
-		Ping:    failing("connection refused"),
-		Schema:  failing("schema version mismatch"),
+		Ready: []httpapi.Condition{
+			{Name: "database", Probe: failing("connection refused")},
+			{Name: "schema", Probe: failing("schema version mismatch")},
+			{Name: "redis", Probe: failing("dial tcp: connect: connection refused")},
+		},
 		Metrics: http.NotFoundHandler(),
 	})
 
@@ -54,29 +58,42 @@ func TestHealthzIsGreenWithoutDatabase(t *testing.T) {
 	}
 }
 
+// The three conditions of etapa 2, failed one at a time: whichever one is
+// broken has to be the one the body names, or the operator reacts to the wrong
+// thing.
 func TestReadyz(t *testing.T) {
 	tests := []struct {
 		name      string
 		ping      httpapi.Probe
 		schema    httpapi.Probe
+		redis     httpapi.Probe
 		wantCode  int
 		wantCheck string
 	}{
-		{"no database", failing("connection refused"), ok, http.StatusServiceUnavailable, "database"},
-		{"wrong schema", ok, failing("schema version mismatch: expected 1, found 99"), http.StatusServiceUnavailable, "schema"},
-		{"both fine", ok, ok, http.StatusOK, ""},
+		{"no database", failing("connection refused"), ok, ok, http.StatusServiceUnavailable, "database"},
+		{"wrong schema", ok, failing("schema version mismatch: expected 1, found 99"), ok, http.StatusServiceUnavailable, "schema"},
+		{"no redis", ok, ok, failing("dial tcp: connect: connection refused"), http.StatusServiceUnavailable, "redis"},
+		{"all three fine", ok, ok, ok, http.StatusOK, ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httpapi.New(httpapi.Deps{Ping: tc.ping, Schema: tc.schema, Metrics: http.NotFoundHandler()})
+			r := httpapi.New(httpapi.Deps{
+				Ready: []httpapi.Condition{
+					{Name: "database", Probe: tc.ping},
+					{Name: "schema", Probe: tc.schema},
+					{Name: "redis", Probe: tc.redis},
+				},
+				Metrics: http.NotFoundHandler(),
+			})
 
 			code, body := get(t, r, "/readyz")
 			if code != tc.wantCode {
 				t.Fatalf("status = %d, want %d (body %v)", code, tc.wantCode, body)
 			}
-			// The body has to name the failing condition: "cannot reach Postgres"
-			// and "Postgres has the wrong schema" need opposite reactions.
+			// The body has to name the failing condition: "cannot reach
+			// Postgres", "Postgres has the wrong schema" and "Redis is down"
+			// need opposite reactions.
 			if body["check"] != tc.wantCheck {
 				t.Errorf("check = %q, want %q", body["check"], tc.wantCheck)
 			}

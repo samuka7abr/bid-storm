@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/samuka7abr/bid-storm/internal/bid"
+	"github.com/samuka7abr/bid-storm/internal/idem"
 	"github.com/samuka7abr/bid-storm/internal/store"
 )
 
@@ -25,6 +26,12 @@ const (
 	codeInvalidMinIncrement     = "invalid_min_increment"
 	codeInvalidStartingBid      = "invalid_starting_bid"
 	codeUnavailable             = "unavailable"
+	// The two codes of the idempotency middleware. No handler here answers
+	// them — the middleware sits above this package and cannot import it back —
+	// so they are aliased rather than retyped: the client's whole vocabulary
+	// stays listed in one place, with one spelling of each.
+	codeInvalidIdempotencyKey = idem.CodeInvalidKey
+	codeIdempotencyInFlight   = idem.CodeInFlight
 )
 
 // AuctionStateView is the state every answer about an existing auction carries.
