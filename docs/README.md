@@ -80,6 +80,7 @@ docs/
 | Documento | Assunto |
 | --- | --- |
 | [decisoes/etapa-1.md](decisoes/etapa-1.md) | As 24 decisões de design da etapa 1, cada uma com a alternativa descartada. As de 19 a 24 emendam `estrategias.md` e `api.md` |
+| [decisoes/etapa-2.md](decisoes/etapa-2.md) | As decisões da etapa 2, numeradas a partir de 25. A 27 emenda a 22 para o caso transacional |
 
 **`specs/` — o que construir**
 
@@ -88,6 +89,7 @@ docs/
 | [specs/etapa-1/01-spec-fundacao.md](specs/etapa-1/01-spec-fundacao.md) | Compose, migration `001`, pool, `/readyz` com fail-fast de schema, `cmd/seed` |
 | [specs/etapa-1/02-spec-engine-otimista.md](specs/etapa-1/02-spec-engine-otimista.md) | `BidEngine`, engine otimista, envelope, as três rotas, métricas de lance, suíte de conformidade |
 | [specs/etapa-1/03-spec-carga-e-checker.md](specs/etapa-1/03-spec-carga-e-checker.md) | Harness k6 com o apostador agressivo, `cmd/checker`, a célula de benchmark reprodutível |
+| [specs/etapa-2/01-spec-engine-pessimista.md](specs/etapa-2/01-spec-engine-pessimista.md) | Engine pessimista com `SELECT ... FOR UPDATE`, `lock_wait_duration_seconds`, a segunda curva do gráfico |
 
 Modelo em [specs/spec-model.md](specs/spec-model.md).
 
