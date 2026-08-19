@@ -50,6 +50,17 @@ func run(log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	// Fails the boot when Redis cannot be reached, for the same reason an
+	// unknown strategy does: serving bids with the idempotency middleware
+	// answering 503 to every keyed request is a whole cell of nothing. Redis
+	// going away later is a different case — the process stays up, /readyz
+	// turns red and /healthz stays green.
+	rdb, err := db.NewRedis(ctx, cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+
 	// A schema divergence does not kill the process. It keeps /healthz green and
 	// /readyz red, so the cause reaches the orchestrator instead of turning into
 	// a mute crashloop.
@@ -84,16 +95,28 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// Above the strategy switch, and the only place the strategy name reaches
+	// it: the middleware carries that label and never learns which engine
+	// answers behind it.
+	idempotency := app.NewIdempotency(rdb, registry, cfg.BidStrategy, log)
+
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.New(httpapi.Deps{
-			Ping:     pool.Ping,
-			Schema:   func(ctx context.Context) error { return db.CheckSchema(ctx, pool) },
-			Metrics:  metrics.Handler(registry),
-			Engine:   engine,
-			Auctions: store.New(pool),
-			Log:      log,
+			// Three conditions, in the order that tells the operator what to
+			// do: unreachable Postgres, wrong schema, unreachable Redis. The
+			// first that fails is the one /readyz names.
+			Ready: []httpapi.Condition{
+				{Name: "database", Probe: pool.Ping},
+				{Name: "schema", Probe: func(ctx context.Context) error { return db.CheckSchema(ctx, pool) }},
+				{Name: "redis", Probe: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
+			},
+			Metrics:     metrics.Handler(registry),
+			Engine:      engine,
+			Auctions:    store.New(pool),
+			Idempotency: idempotency,
+			Log:         log,
 		}),
 	}
 
