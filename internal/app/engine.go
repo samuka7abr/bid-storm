@@ -30,26 +30,29 @@ const (
 
 // NewEngine returns the engine BID_STRATEGY selects, already wrapped in the
 // metrics decorator — the wrapping happens here so that no engine can be built
-// unmeasured, and so all three are timed at one boundary.
+// unmeasured, and so all three are timed at one boundary — and in the carrier
+// that hands it the idempotency key of the request.
 //
 // Unimplemented and unknown strategies fail at boot rather than at the first
 // bid: a process that comes up and only then discovers it has no engine turns a
 // typo into a benchmark cell full of 503s.
 func NewEngine(strategy string, pool *pgxpool.Pool, reg prometheus.Registerer) (bid.BidEngine, error) {
+	var engine bid.BidEngine
 	switch strategy {
 	case StrategyOptimistic:
-		return metrics.Instrument(optimistic.New(pool), reg, strategy), nil
+		engine = optimistic.New(pool)
 	case StrategyPessimistic:
 		// The lock observer is built here, off the same registry, because
 		// internal/metrics owns every series name and the engine is handed a
 		// one-method interface instead. Wrapping still happens outside it: what
 		// compares the three strategies is measured at one boundary, and only
 		// what describes this mechanism is measured from within (decisão 28).
-		return metrics.Instrument(pessimistic.New(pool, metrics.NewLockWait(reg)), reg, strategy), nil
+		engine = pessimistic.New(pool, metrics.NewLockWait(reg))
 	case StrategyShard:
 		return nil, fmt.Errorf("BID_STRATEGY=%s: the single-writer engine arrives in etapa 3", strategy)
 	default:
 		return nil, fmt.Errorf("BID_STRATEGY=%q is not a strategy: want %s, %s or %s",
 			strategy, StrategyOptimistic, StrategyPessimistic, StrategyShard)
 	}
+	return carrier{next: metrics.Instrument(engine, reg, strategy)}, nil
 }
