@@ -87,6 +87,7 @@ docs/
 | --- | --- |
 | [specs/etapa-1/01-spec-fundacao.md](specs/etapa-1/01-spec-fundacao.md) | Compose, migration `001`, pool, `/readyz` com fail-fast de schema, `cmd/seed` |
 | [specs/etapa-1/02-spec-engine-otimista.md](specs/etapa-1/02-spec-engine-otimista.md) | `BidEngine`, engine otimista, envelope, as três rotas, métricas de lance, suíte de conformidade |
+| [specs/etapa-1/03-spec-carga-e-checker.md](specs/etapa-1/03-spec-carga-e-checker.md) | Harness k6 com o apostador agressivo, `cmd/checker`, a célula de benchmark reprodutível |
 
 Modelo em [specs/spec-model.md](specs/spec-model.md).
 
