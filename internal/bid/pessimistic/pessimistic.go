@@ -95,7 +95,7 @@ func (e *Engine) PlaceBid(ctx context.Context, req bid.BidRequest) (bid.BidResul
 	bidID := uuid.New()
 	var version int64
 	if err := tx.QueryRow(ctx, placeBid,
-		req.AmountCents, req.UserID, req.AuctionID, bidID,
+		req.AmountCents, req.UserID, req.AuctionID, bidID, req.IdempotencyKey,
 	).Scan(&version); err != nil {
 		return bid.BidResult{}, fmt.Errorf("place bid: %w", err)
 	}

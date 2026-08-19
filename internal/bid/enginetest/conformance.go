@@ -131,6 +131,36 @@ func RunConformance(t *testing.T, newEngine func(*pgxpool.Pool) bid.BidEngine) {
 		}
 	})
 
+	// bids.idempotency_key and its partial unique index have existed since
+	// migration 001 and never received a value. The case is here, and not only
+	// inside each engine, because the target is the shard of etapa 3: it decides
+	// in memory and has no WHERE clause to remind it of the column, so the
+	// obligation has to be executable — the new engine passes this or it is
+	// wrong (decisão 39).
+	t.Run("an accept records the key it came with, and NULL when it came without", func(t *testing.T) {
+		auction := seedAuction(t, pg.Pool, time.Minute)
+		key := uuid.NewString()
+
+		keyed := placeKeyed(t, engine, auction, ptr(int64(0)), minIncrement, key)
+		if keyed.Outcome != bid.Accepted {
+			t.Fatalf("outcome = %v, want accepted", keyed.Outcome)
+		}
+		if got := keyOfBid(t, pg.Pool, auction, keyed.Seq); got == nil || *got != key {
+			t.Errorf("idempotency_key = %v, want %q", got, key)
+		}
+
+		// A bid without a key writes NULL, which is what keeps it out of the
+		// partial unique index — the empty string would put every keyless bid
+		// in it and the second one would be refused.
+		anonymous := placeKeyed(t, engine, auction, ptr(int64(1)), 2*minIncrement, "")
+		if anonymous.Outcome != bid.Accepted {
+			t.Fatalf("outcome = %v, want accepted", anonymous.Outcome)
+		}
+		if got := keyOfBid(t, pg.Pool, auction, anonymous.Seq); got != nil {
+			t.Errorf("idempotency_key = %q, want NULL", *got)
+		}
+	})
+
 	t.Run("concurrent bids leave a replayable history", func(t *testing.T) {
 		auction := seedAuction(t, pg.Pool, time.Minute)
 
@@ -234,11 +264,17 @@ func replay(t *testing.T, pool *pgxpool.Pool, auction uuid.UUID, accepted int64)
 
 func place(t *testing.T, engine bid.BidEngine, auction uuid.UUID, version *int64, amount int64) bid.BidResult {
 	t.Helper()
+	return placeKeyed(t, engine, auction, version, amount, "")
+}
+
+func placeKeyed(t *testing.T, engine bid.BidEngine, auction uuid.UUID, version *int64, amount int64, key string) bid.BidResult {
+	t.Helper()
 	res, err := engine.PlaceBid(context.Background(), bid.BidRequest{
 		AuctionID:       auction,
 		UserID:          uuid.New(),
 		AmountCents:     amount,
 		ExpectedVersion: version,
+		IdempotencyKey:  key,
 	})
 	// Every rejection is a nil error, without exception.
 	if err != nil {
@@ -270,6 +306,19 @@ func countBids(t *testing.T, pool *pgxpool.Pool, auction uuid.UUID) int64 {
 		t.Fatalf("count bids: %v", err)
 	}
 	return n
+}
+
+// keyOfBid reads the column back, and nil means the NULL that keeps a row out
+// of bids_idempotency_key_uq. Reading the history back is the only thing this
+// suite does with SQL: no engine is asserted against a statement.
+func keyOfBid(t *testing.T, pool *pgxpool.Pool, auction uuid.UUID, seq int64) *string {
+	t.Helper()
+	var key *string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT idempotency_key FROM bids WHERE auction_id = $1 AND seq = $2`, auction, seq).Scan(&key); err != nil {
+		t.Fatalf("read idempotency_key: %v", err)
+	}
+	return key
 }
 
 func ptr(v int64) *int64 { return &v }

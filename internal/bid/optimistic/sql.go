@@ -15,6 +15,12 @@ package optimistic
 // engine a free transaction to level the two would hide that cost and tilt the
 // benchmark towards the project's own hypothesis.
 //
+// The NULLIF around $6 is what finally puts a value in the column migration 001
+// created empty: a bid without a key writes NULL and stays outside the partial
+// unique index, exactly as decisão 15 drew it. The index is the net under Redis,
+// for when it restarts or a key expires early, and a net nobody weaves is not a
+// net.
+//
 // min_increment_cents comes out of the final SELECT rather than the INSERT's
 // RETURNING, which only sees columns of the table it wrote. It is here because
 // the 201 publishes minNextBid, and without it the happy path would need a
@@ -33,8 +39,8 @@ WITH upd AS (
     RETURNING version, min_increment_cents
 ),
 ins AS (
-    INSERT INTO bids (id, auction_id, user_id, amount_cents, seq)
-    SELECT $5, $3, $2, $1, upd.version FROM upd
+    INSERT INTO bids (id, auction_id, user_id, amount_cents, seq, idempotency_key)
+    SELECT $5, $3, $2, $1, upd.version, NULLIF($6, '') FROM upd
     RETURNING seq
 )
 SELECT ins.seq, upd.min_increment_cents FROM ins, upd`

@@ -29,6 +29,11 @@ SELECT version, highest_bid_cents, min_increment_cents, status, ends_at, clock_t
 // unreachable. An unreachable branch is not safety, it is code that was never
 // tested waiting for its first occasion.
 //
+// The NULLIF around $5 writes the key the request carried, and NULL when it
+// carried none, which keeps that row outside the partial unique index (decisão 15). The
+// engine decides nothing with the key: it never reads Redis, and the outcome of
+// a bid does not depend on the key existing.
+//
 // UPDATE and INSERT share one CTE, the same shape the optimistic engine uses.
 // That is not the mechanism of pessimism, so it does not get to cost a
 // round-trip: what pessimism pays for is Begin, the locked read and Commit
@@ -44,7 +49,7 @@ WITH upd AS (
     RETURNING version
 ),
 ins AS (
-    INSERT INTO bids (id, auction_id, user_id, amount_cents, seq)
-    SELECT $4, $3, $2, $1, upd.version FROM upd
+    INSERT INTO bids (id, auction_id, user_id, amount_cents, seq, idempotency_key)
+    SELECT $4, $3, $2, $1, upd.version, NULLIF($5, '') FROM upd
 )
 SELECT version FROM upd`
