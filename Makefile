@@ -17,9 +17,20 @@ POSTGRES_PORT ?= 5432
 COMPOSE_DB_URL = postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?sslmode=disable
 HOST_DB_URL    = postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
 
-SEED_SOURCES = $(shell find cmd/seed internal -name '*.go') go.mod
+# RUN names the cell's artefact directory. Recursively expanded, so `date` only
+# runs when a bench or check target actually asks for it.
+RUN      ?= $(shell date -u +%Y%m%dT%H%M%S)
+POLICY   ?= immediate
+SCENARIO ?= smoke
+# Loose enough that nothing closes mid-cell: an auction dying under load mixes
+# contention with the closing edge in one number (RF03). Separate from ENDS_IN
+# so that a plain `make seed` keeps its own default.
+BENCH_ENDS_IN ?= 30m
 
-.PHONY: up down migrate migrate-down seed run logs test fmt lint
+SEED_SOURCES    = $(shell find cmd/seed internal -name '*.go') go.mod
+CHECKER_SOURCES = $(shell find cmd/checker -name '*.go') go.mod
+
+.PHONY: up down migrate migrate-down seed run logs test fmt lint bench check
 
 up:
 	docker compose up -d --build
@@ -49,6 +60,21 @@ seed: bin/seed
 
 run:
 	STRATEGY=$(STRATEGY) docker compose up -d --build auctiond
+
+bin/checker: $(CHECKER_SOURCES)
+	go build -o bin/checker ./cmd/checker
+
+# One cell, end to end, exiting with the checker's code so that the loop of
+# etapa 5 can stop on it.
+bench:
+	RUN=$(RUN) AUCTIONS=$(AUCTIONS) POLICY=$(POLICY) SCENARIO=$(SCENARIO) \
+	STRATEGY=$(STRATEGY) ENDS_IN=$(BENCH_ENDS_IN) MIN_INCREMENT=$(MIN_INCREMENT) \
+	DATABASE_URL="$(HOST_DB_URL)" bench/run-cell.sh
+
+# Re-verifies a cell already on disk, which is what makes a planted violation
+# testable without re-running the load.
+check: bin/checker
+	DATABASE_URL="$(HOST_DB_URL)" ./bin/checker -run=$(RUN)
 
 logs:
 	docker compose logs -f
